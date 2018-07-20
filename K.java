@@ -75,7 +75,7 @@ public class K {
 
     public static void main(String[] args) throws Exception {
         if (args.length == 0) {
-            System.out.println("Usage: java <common option>* K <command> <option>*\n\n"
+            System.out.println("Usage: java K <common option>* <command> <option>*\n\n"
                     + "Common options:\n\n"
                     + " -n[=lib] uses native provider\n"
                     + " -d       turns on debug\n");
