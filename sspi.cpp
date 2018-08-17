@@ -977,23 +977,14 @@ gss_delete_sec_context(OM_uint32 *minor_status,
                        gss_buffer_t output_token)
 {
     PP(">>>> Calling gss_delete_sec_context...");
-PP("");
     Context* pc = (Context*) *context_handle;
-PP("");
     DeleteSecurityContext(&pc->hCtxt);
-PP("");
     if (pc->phCred != NULL) {
-PP("");
         FreeCredentialsHandle(pc->phCred);
-PP("");
         pc->phCred = NULL;
-PP("");
     }
-PP("");
 //    FreeContextBuffer(&pc->nnames);
-PP("");
     delete pc;
-PP("");
     return GSS_S_COMPLETE;
 }
 
