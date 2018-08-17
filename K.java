@@ -30,7 +30,7 @@ import java.net.Authenticator;
 import java.net.PasswordAuthentication;
 import java.net.URL;
 import java.nio.file.Files;
-import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.security.PrivilegedExceptionAction;
 import java.util.*;
 import javax.security.auth.Subject;
@@ -39,11 +39,6 @@ import javax.security.auth.kerberos.KerberosTicket;
 import javax.security.auth.login.*;
 
 import org.ietf.jgss.*;
-import sun.security.krb5.EncryptedData;
-import sun.security.krb5.EncryptionKey;
-import sun.security.krb5.PrincipalName;
-import sun.security.krb5.internal.ktab.KeyTabEntry;
-import sun.security.util.DerValue;
 
 import java.util.logging.ConsoleHandler;
 import java.util.logging.Handler;
@@ -85,8 +80,6 @@ public class K {
             System.out.println();
             System.out.println(w_help);
             System.out.println();
-            System.out.println(d_help);
-            System.out.println();
             System.out.println(c_help);
         } else {
             for (int i=0; i<args.length; i++) {
@@ -120,9 +113,6 @@ public class K {
                             break;
                         case "w":
                             w(args);
-                            break;
-                        case "d":
-                            d(args);
                             break;
                         case "c":
                             c(args);
@@ -587,108 +577,6 @@ public class K {
 
     ///////////////////////////////////////////////////////////////////
 
-    static String d_help = "java K d name pass etype\njava K d keytab"
-            + "\n\nDecrypt a Kerberos EncryptedData."
-            + "\nThe stdin includes EncryptedData in hex or raw\n"
-            + "\n pname         Principal Name"
-            + "\n pass          password"
-            + "\n <usage>       Key usage number";
-
-    public static void d(String[] args) throws Exception {
-        byte[] cipher = System.in.readAllBytes();
-        if (cipher[0] == '3' && cipher[1] == '0') {
-            cipher = xeh(new String(cipher));
-        }
-        Constructor<EncryptedData> cons =
-                EncryptedData.class.getDeclaredConstructor(DerValue.class);
-        cons.setAccessible(true);
-        EncryptedData d;
-        try {
-            d = cons.newInstance(new DerValue(cipher));
-        } catch (Exception e) {
-            System.out.println("Not full EncryptedData, maybe only cipher");
-            d = null;
-        }
-        if (new File(args[0]).exists()) {
-            // keytab
-            sun.security.krb5.internal.ktab.KeyTab tab
-                    = sun.security.krb5.internal.ktab.KeyTab.getInstance(args[0]);
-            for (KeyTabEntry e: tab.getEntries()) {
-                EncryptionKey k = e.getKey();
-                EncryptedData d2 = d;
-                if (d == null) {
-                    d2 = new EncryptedData(k.getEType(), 0, cipher);
-                }
-                try {
-                    System.err.println("Decrypted with " + e.getService());
-                    System.out.write(dec0(k, d2, -1));
-                    System.err.println("Decrypted with " + e.getService());
-                    break;
-                } catch (Exception e2) {
-                    // next
-                }
-            }
-        } else {
-            System.err.println("\u001b[1;37;41muser: " + args[0]
-                    + " pass: " + args[1]);
-            System.err.println("\u001b[m\n");
-            PrincipalName pn = new PrincipalName(args[0]);
-            char[] password = args[1].toCharArray();
-            int etype = Integer.valueOf(args[2]);
-            int usage = args.length > 3 ? Integer.valueOf(args[3]) : -1;
-            EncryptionKey k = EncryptionKey.acquireSecretKey(
-                    password, pn.getSalt(), etype, null);
-            if (d == null) {
-                d = new EncryptedData(etype, 0, cipher);
-            } else {
-                if (d.getEType() != etype) {
-                    System.err.println("\u001b[1;37;41md " + d.getEType());
-                    System.err.println("\u001b[m\n");
-                }
-            }
-            System.out.println(hex(k.asn1Encode()));
-            System.out.write(dec0(k, d, usage));
-        }
-    }
-
-    private static byte[] dec0(EncryptionKey k, EncryptedData d, int usage)
-            throws Exception {
-        if (usage >= 0) {
-            return d.decrypt(k, usage);
-        } else {
-            for (int i=0; i<30; i++) {
-                try {
-                    byte[] out = d.decrypt(k, i);
-                    System.out.println("=== detected keyusage: " + i + "===");
-                    return out;
-                } catch (Exception e) {
-                    //
-                }
-            }
-        }
-        throw new Exception("No one works");
-    }
-
-    public static byte[] xeh(String in) {
-        in = in.replaceAll("\\s", "");
-        int len = in.length()/2;
-        byte[] out = new byte[len];
-        for (int i=0; i<len; i++) {
-            out[i] = Byte.parseByte(in.substring(i*2, i*2+2), 16);
-        }
-        return out;
-    }
-
-    public static String hex(byte[] bs) {
-        StringBuffer sb = new StringBuffer(bs.length * 2);
-        for(byte b : bs) {
-            sb.append(String.format("%02x", b & 0xff));
-        }
-        return sb.toString();
-    }
-
-    ///////////////////////////////////////////////////////////////////
-
     static String c_help = "java K c <option>* <command>+"
             + "\n\nChoreograph several commands talking to each other"
             + "\nFor example: java K c \"K -n q - - server -d\" \"K p server keytab backend\" -d 3000 \"K p backend keytab\"\n"
@@ -702,7 +590,7 @@ public class K {
 
     public static void c(String[] args) throws Exception {
         String java = System.getProperty("java.home") + "/bin/java";
-        Files.write(Path.of("policy"), List.of(
+        Files.write(Paths.get("policy"), Arrays.asList(
                 "grant {",
                 "  permission java.security.AllPermission;",
                 "};"
