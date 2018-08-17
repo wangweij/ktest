@@ -48,16 +48,6 @@ For example: java K w kerberos http://www.protected.com
  scheme        Negotiate or Kerberos or NTLM etc
  url           URL
 
-java K d name pass etype
-java K d keytab
-
-Decrypt a Kerberos EncryptedData.
-The stdin includes EncryptedData in hex or raw
-
- pname         Principal Name
- pass          password
- <usage>       Key usage number
-
 java K c <option>* <command>+
 
 Choreograph several commands talking to each other
