@@ -23,7 +23,7 @@
  * questions.
  */
 
-// This library is client-side only, and only supports the default credential.
+// This library is client-side only, and only supports the default credentials.
 // It only speaks krb5. SPNEGO is supported by creating its own NetTokenInit
 // and parsing incoming NegTokenResp tokens. This ensures no other mechanism
 // (Ex: NTLM) is chosen.
@@ -62,8 +62,23 @@
 extern "C" {
 #endif /* __cplusplus */
 
-// When KRB5_TRACE is set, debug info print out to stdout.
+// When KRB5_TRACE is set, debug info goes to stdout. The value is ignored.
 char* trace = getenv("KRB5_TRACE");
+
+void
+dump(LPSTR title, PBYTE data, DWORD len)
+{
+    if (trace) {
+        printf("==== %s ====\n", title);
+        for (DWORD i = 0; i < len; i++) {
+            if (i != 0 && i % 16 == 0) {
+                printf("\n");
+            }
+            printf("%02X ", *(data + i) & 0xff);
+        }
+        printf("\n");
+    }
+}
 
 gss_OID_desc KRB5_OID = {9, "\x2a\x86\x48\x86\xf7\x12\x01\x02\x02"};
 gss_OID_desc SPNEGO_OID = {6, "\x2b\x06\x01\x05\x05\x02"};
@@ -94,14 +109,14 @@ typedef struct {
 
 /* This section holds supporting functions that are not exported */
 
-// Prepend tag+length to data.
+// Prepend ASN.1 tag+length to data.
 //
-// [in, out] data: the data, which already has enough allocated space before
-//                 its head when called. Head move backwards after called.
+// [in, out] data: the data, which already had enough allocated space before
+//                 its head when called. Head moved backwards after called.
 // [in, out] pLen: a counter to maintain
-// [in]       len: the ASN.1 length (should be less than 2^16)
+// [in]       len: the ASN.1 length (MUST be less than 2^16)
 // [in]       tag: the ASN.1 tag
-int
+void
 add_der_head(char** data, int* pLen, int len, int tag)
 {
     char* pos = *data;
@@ -122,27 +137,26 @@ add_der_head(char** data, int* pLen, int len, int tag)
     pos[-1-lenlen] = (char)tag;
     *pLen += 1 + lenlen;
     *data = pos - 1 - lenlen;
-    return 1;
 }
 
 // Prepend bytes to data.
 //
-// [in, out] data: the data, which already has enough allocated space before
-//                 its head when called. Head move backwards after called.
+// [in, out] data: the data, which already had enough allocated space before
+//                 its head when called. Head moved backwards after called.
 // [in, out] pLen: a counter to maintain
 // [in]        in: a block of bytes
-// [in]       len: length if bytes in in
-int
+// [in]       len: length of in
+void
 add_data(char** data, int* pLen, char* in, int len)
 {
     char* pos = *data;
     memcpy_s(pos - len, len, in, len);
     *pLen += len;
     *data = pos - len;
-    return 1;
 }
 
 // Wrap a krb5 token into NegTokenInit
+// Returns 1 for success, 0 for failure
 int
 krb5_to_spnego(gss_buffer_t input, gss_buffer_t output)
 {
@@ -185,7 +199,8 @@ krb5_to_spnego(gss_buffer_t input, gss_buffer_t output)
     return 1;
 }
 
-// Advances pass tag and len, returns the len
+// Advances pass ASN.1 tag and length.
+// Returns the length value
 int
 skip_tag_len(char** data)
 {
@@ -204,6 +219,8 @@ skip_tag_len(char** data)
         pos++;
         n = (n << 8) | (*pos & 0xff);
         pos++;
+    } else {
+        return -1;
     }
     *data = pos;
     return n;
@@ -223,12 +240,18 @@ spnego_to_krb5(gss_buffer_t input, gss_buffer_t output)
             skip_tag_len(&data);
             output->length = skip_tag_len(&data);
             output->value = data;
+            if (input->length - ((char*)output->value - (char*)input->value)
+                    < output->length) {
+                // inner token has a length field longer than outer token
+                break;
+            }
             return result;
         } else {
             if (*data == (char)0xA0) {
                 result = data[4];
             }
-            data += skip_tag_len(&data);
+            int tagAndLen = skip_tag_len(&data);
+            data += tagAndLen;
         }
     }
     output->length = 0;
@@ -239,15 +262,17 @@ spnego_to_krb5(gss_buffer_t input, gss_buffer_t output)
 void
 showTime(TimeStamp* ts)
 {
-    SYSTEMTIME stLocal;
-    FileTimeToSystemTime((FILETIME*)ts, &stLocal);
+    if (trace) {
+        SYSTEMTIME stLocal;
+        FileTimeToSystemTime((FILETIME*)ts, &stLocal);
 
-    // Build a string showing the date and time.
-    PP("---------------");
-    PP("TS low high %ld %ld", ts->LowPart, ts->HighPart);
-    PP("Local: %02d/%02d/%d  %02d:%02d",
-        stLocal.wMonth, stLocal.wDay, stLocal.wYear,
-        stLocal.wHour, stLocal.wMinute);
+        // Build a string showing the date and time.
+        PP("---------------");
+        PP("TS low high %ld %ld", ts->LowPart, ts->HighPart);
+        PP("Local: %02d/%02d/%d  %02d:%02d",
+            stLocal.wMonth, stLocal.wDay, stLocal.wYear,
+            stLocal.wHour, stLocal.wMinute);
+    }
 }
 
 long
@@ -264,7 +289,7 @@ SecondsUntil(TimeStamp *time)
     uiLocal.LowPart = nowLocal.dwLowDateTime;
     long diff = (long)((time->QuadPart - uiLocal.QuadPart) / 10000000);
     if (diff < 0 || diff > 8640000) {
-        // AcquireCredentialsHandle returns a strange TimeStamp.
+        // TODO: AcquireCredentialsHandle returns a strange TimeStamp.
         PP("SecondsUntil is %ld. Change to 1 day", diff);
         diff = 86400;
     }
@@ -328,29 +353,34 @@ isSameOID(gss_OID o2, gss_OID o1)
 void
 displayOID(gss_OID mech)
 {
-    if (isSameOID(mech, &KRB5_OID)) {
-        PP("Kerberos OID");
-    } else if (isSameOID(mech, &SPNEGO_OID)) {
-        PP("SPNEGO OID");
-    } else {
-        PP("UNKNOWN %d", mech->length);
+    if (trace) {
+        if (isSameOID(mech, &KRB5_OID)) {
+            PP("Kerberos OID");
+        } else if (isSameOID(mech, &SPNEGO_OID)) {
+            PP("SPNEGO OID");
+        } else {
+            dump("UNKNOWN OID", (PBYTE)mech->elements, mech->length);
+        }
     }
 }
 
 void
 displayOidSet(gss_OID_set mechs)
 {
-    if (mechs == NULL) {
-        PP("OID set is NULL");
-        return;
-    }
-    PP("set.count is %d", (int)mechs->count);
-    for (int i = 0; i < mechs->count; i++) {
-        displayOID(&mechs->elements[i]);
+    if (trace) {
+        if (mechs == NULL) {
+            PP("OID set is NULL");
+            return;
+        }
+        PP("gss_OID_set.count is %d", (int)mechs->count);
+        for (int i = 0; i < mechs->count; i++) {
+            displayOID(&mechs->elements[i]);
+        }
     }
 }
 
-// Add realm to a name if there was none
+// Add realm to a name if there was none.
+// Returns a newly allocated name.
 WCHAR*
 get_full_name(WCHAR* input)
 {
@@ -360,35 +390,48 @@ get_full_name(WCHAR* input)
     }
 
     // Is this a host-based service name? Ex: service/host.domain.com.
-    WCHAR* slash = wcsrchr(input, '/'); // /host.domain.com
-    if (slash) {
-        slash = wcschr(slash, '.'); // .domain.com
-        if (slash != NULL) {
-            slash++; // domain.com
+    // Then we assume the realm is DOMAIN.COM.
+    WCHAR* realm = wcsrchr(input, '/'); // /host.domain.com
+    if (realm) {
+        realm = wcschr(realm, '.'); // .domain.com
+        if (realm != NULL) {
+            realm++; // domain.com
         }
     }
 
-    WCHAR* fullname = new WCHAR[256];
+    // Otherwise we use the default domain
+    if (realm == NULL) {
+        realm = _wgetenv(L"USERDNSDOMAIN");
+        if (realm == NULL) {
+            realm = L"";
+        }
+    }
+
     size_t oldlen = wcslen(input);
-    wcscpy_s(fullname, 256, input);
+    WCHAR* fullname = new WCHAR[oldlen + 1 + wcslen(realm) + 1];
+    if (!fullname) {
+        return NULL;
+    }
+    wcscpy_s(fullname, oldlen + 1, input);
     fullname[oldlen] = '@';
 
-    if (slash == NULL) { // Not host-based, or not FQDN, add default domain
-        size_t outlen;
-        if (_wgetenv_s(&outlen, fullname + oldlen + 1,
-                256 - 1 - oldlen, L"USERDNSDOMAIN")) {
-            fullname[oldlen + 1] = 0;
-        }
-    } else { // Add domain in FQDN as realm name
-        wcscpy_s(fullname + oldlen + 1, 256 - 1 - oldlen, slash);
-        _wcsupr(fullname + oldlen + 1);
-    }
+    wcscpy_s(fullname + oldlen + 1, wcslen(realm) + 1, realm);
+    _wcsupr(fullname + oldlen + 1);
+
     return fullname;
 }
 
 /* End support section */
 
-/* This section holds exported functions that currently have no implementation */
+/* This section holds GSS-API exported functions */
+
+#define CHECK_OUTPUT(x)  if (!x) return GSS_S_FAILURE;
+#define CHECK_BUFFER(b)  if (!b || !b->value) return GSS_S_FAILURE;
+#define CHECK_OID(o)     if (!o || !o->elements) return GSS_S_FAILURE;
+#define CHECK_NAME(n)    if (!n || !(((Name*)n)->name)) return GSS_S_BAD_NAME;
+#define CHECK_CONTEXT(c) if (!c) return GSS_S_NO_CONTEXT;
+#define CHECK_CRED(c)    if (!c || !(((Credential*)cred_handle)->phCred)) \
+                                return GSS_S_NO_CRED;
 
 __declspec(dllexport) OM_uint32
 gss_release_name(OM_uint32 *minor_status,
@@ -413,16 +456,15 @@ gss_import_name(OM_uint32 *minor_status,
                 gss_name_t *output_name)
 {
     PP(">>>> Calling gss_import_name...");
-    Name* name = new Name;
-    if (input_name_buffer == NULL || input_name_buffer->value == NULL
-            || input_name_buffer->length == 0) {
-        return GSS_S_CALL_INACCESSIBLE_READ;
-    }
+    CHECK_BUFFER(input_name_buffer)
+    CHECK_OID(input_name_type)
+    CHECK_OUTPUT(output_name)
+
     int len = (int)input_name_buffer->length;
     LPSTR input = (LPSTR)input_name_buffer->value;
     BOOLEAN isNegotiate = true;
-    if (input_name_type != NULL
-            && isSameOID(input_name_type, &EXPORT_NAME_OID)) {
+    if (isSameOID(input_name_type, &EXPORT_NAME_OID)) {
+        // Skip OID and other headers
         len -= (int)input[3] + 8;
         isNegotiate = (int)input[3] == 6;
         input = input + (int)input[3] + 8;
@@ -433,18 +475,25 @@ gss_import_name(OM_uint32 *minor_status,
         goto err;
     }
 
-    if (MultiByteToWideChar(CP_ACP, 0, input, len, value, len) == 0) {
+    len = MultiByteToWideChar(CP_ACP, 0, input, len, value, len+1);
+    if (len == 0) {
         goto err;
     }
     value[len] = 0;
+
     if (input_name_type != NULL
             && isSameOID(input_name_type, &HOST_SERVICE_NAME_OID)) {
+        // HOST_SERVICE_NAME_OID takes the form of service@host.
         for (int i = 0; i < len; i++) {
             if (value[i] == '@') {
                 value[i] = '/';
                 break;
             }
         }
+    }
+    Name* name = new Name;
+    if (name == NULL) {
+        goto err;
     }
     name->name = value;
     *output_name = (gss_name_t) name;
@@ -453,7 +502,9 @@ err:
     if (value != NULL) {
         delete[] value;
     }
-    delete name;
+    if (name != NULL) {
+        delete name;
+    }
     return GSS_S_FAILURE;
 }
 
@@ -464,10 +515,9 @@ gss_compare_name(OM_uint32 *minor_status,
                  int *name_equal)
 {
     PP(">>>> Calling gss_compare_name...");
-    if (name1 == NULL || name2 == NULL) {
-        *name_equal = 0;
-        return GSS_S_CALL_INACCESSIBLE_READ;
-    }
+    CHECK_NAME(name1)
+    CHECK_NAME(name2)
+    CHECK_OUTPUT(name_equal)
 
     SEC_WCHAR* names1 = ((Name*)name1)->name;
     SEC_WCHAR* names2 = ((Name*)name2)->name;
@@ -486,12 +536,15 @@ gss_canonicalize_name(OM_uint32 *minor_status,
                       gss_name_t *output_name)
 {
     PP(">>>> Calling gss_canonicalize_name...");
+    CHECK_NAME(input_name)
+    CHECK_OID(mech_type)
+    CHECK_OUTPUT(output_name)
+
     Name* names1 = (Name*)input_name;
     Name* names2 = new Name;
     if (names2 == NULL) {
         return GSS_S_FAILURE;
     }
-    PP("new name at %p", names2);
     names2->name = new SEC_WCHAR[lstrlen(names1->name) + 1];
     if (names2->name == NULL) {
         delete names2;
@@ -508,16 +561,24 @@ gss_export_name(OM_uint32 *minor_status,
                 gss_buffer_t exported_name)
 {
     PP(">>>> Calling gss_export_name...");
-    OM_uint32 result;
+    CHECK_NAME(input_name)
+    CHECK_OUTPUT(exported_name)
+
+    OM_uint32 result = GSS_S_FAILURE;
     SEC_WCHAR* name = ((Name*)input_name)->name;
     SEC_WCHAR* fullname = get_full_name(name);
+    if (!fullname) {
+        goto err;
+    }
+    PP("%ls -> %ls", name, fullname);
     int len = (int)wcslen(fullname);
     if (len < 256) {
+        // We only deal with not-so-long names.
         // 04 01 00 ** 06 ** OID len:int32 name
         int mechLen = KRB5_OID.length;
         char* buffer = new char[10 + mechLen + len];
         if (buffer == NULL) {
-            return GSS_S_FAILURE;
+            goto err;
         }
         buffer[0] = 4;
         buffer[1] = 1;
@@ -528,18 +589,17 @@ gss_export_name(OM_uint32 *minor_status,
         memcpy_s(buffer + 6, mechLen, KRB5_OID.elements, mechLen);
         buffer[6 + mechLen] = buffer[7 + mechLen] = buffer[8 + mechLen] = 0;
         buffer[9 + mechLen] = (char)len;
-        if (WideCharToMultiByte(CP_ACP, 0, fullname, len,
-                    buffer+10+mechLen, len, NULL, NULL) == 0) {
-            delete buffer;
-            return GSS_S_FAILURE;
+        len = WideCharToMultiByte(CP_ACP, 0, fullname, len,
+                    buffer+10+mechLen, len, NULL, NULL);
+        if (len == 0) {
+            delete[] buffer;
+            goto err;
         }
         exported_name->length = 10 + mechLen + len;
         exported_name->value = buffer;
-
         result = GSS_S_COMPLETE;
-    } else {
-        result = GSS_S_FAILURE;
     }
+err:
     if (fullname != name) {
         delete[] fullname;
     }
@@ -553,10 +613,17 @@ gss_display_name(OM_uint32 *minor_status,
                  gss_OID *output_name_type)
 {
     PP(">>>> Calling gss_display_name...");
+    CHECK_NAME(input_name)
+    CHECK_OUTPUT(output_name_buffer)
+
     SEC_WCHAR* names = ((Name*)input_name)->name;
     int len = (int)wcslen(names);
     char* buffer = new char[len+1];
-    if (WideCharToMultiByte(CP_ACP, 0, names, len, buffer, len, NULL, NULL) == 0) {
+    if (buffer == NULL) {
+        return GSS_S_FAILURE;
+    }
+    len = WideCharToMultiByte(CP_ACP, 0, names, len, buffer, len, NULL, NULL);
+    if (len == 0) {
         return GSS_S_FAILURE;
     }
     buffer[len] = 0;
@@ -581,14 +648,19 @@ gss_acquire_cred(OM_uint32 *minor_status,
                  OM_uint32 *time_rec)
 {
     PP(">>>> Calling gss_acquire_cred...");
+    CHECK_OUTPUT(output_cred_handle)
+
     SECURITY_STATUS ss;
     TimeStamp ts;
     ts.QuadPart = 0;
     cred_usage = 0;
     PP("AcquireCredentialsHandle with %d %p", cred_usage, desired_mech);
     displayOidSet(desired_mech);
-    Credential* cred = new Credential();
-    cred->phCred = new CredHandle();
+    Credential* cred = new Credential;
+    cred->phCred = new CredHandle;
+    if (cred == NULL || cred->phCred == NULL) {
+        return GSS_S_FAILURE;
+    }
     ts.QuadPart = 0;
     ss = AcquireCredentialsHandle(
             NULL,
@@ -601,7 +673,7 @@ gss_acquire_cred(OM_uint32 *minor_status,
             NULL,
             cred->phCred,
             &ts);
-    actual_mechs = &desired_mech; // dup?
+    actual_mechs = &desired_mech; // TODO: dup?
     *output_cred_handle = (void*)cred;
     showTime(&ts);
     cred->time = SecondsUntil(&ts);
@@ -611,8 +683,10 @@ gss_acquire_cred(OM_uint32 *minor_status,
 
     if (desired_name != NULL) {
         gss_name_t realname;
-        gss_inquire_cred(minor_status, *output_cred_handle, &realname,
-                NULL, NULL, NULL);
+        if (gss_inquire_cred(minor_status, *output_cred_handle, &realname,
+                NULL, NULL, NULL) != GSS_S_COMPLETE) {
+            return GSS_S_FAILURE;
+        }
         SEC_WCHAR* dnames = ((Name*)desired_name)->name;
         SEC_WCHAR* rnames = ((Name*)realname)->name;
         PP("comp name %ls %ls", dnames, rnames);
@@ -648,6 +722,8 @@ gss_inquire_cred(OM_uint32 *minor_status,
                  gss_OID_set *mechanisms)
 {
     PP(">>>> Calling gss_inquire_cred...");
+    CHECK_CRED(cred_handle)
+
     CredHandle* cred = ((Credential*)cred_handle)->phCred;
     SECURITY_STATUS ss;
     if (name) {
@@ -694,7 +770,6 @@ gss_import_sec_context(OM_uint32 *minor_status,
     return GSS_S_FAILURE;
 }
 
-
 __declspec(dllexport) OM_uint32
 gss_init_sec_context(OM_uint32 *minor_status,
                      gss_cred_id_t initiator_cred_handle,
@@ -711,6 +786,9 @@ gss_init_sec_context(OM_uint32 *minor_status,
                      OM_uint32 *time_rec)
 {
     PP(">>>> Calling gss_init_sec_context...");
+    CHECK_NAME(target_name)
+    CHECK_OUTPUT(output_token)
+
     SECURITY_STATUS ss;
     TimeStamp Lifetime;
     SecBufferDesc InBuffDesc;
@@ -733,6 +811,10 @@ gss_init_sec_context(OM_uint32 *minor_status,
         pc = (Context*)*context_handle;
     }
 
+    if (pc == NULL) {
+        return GSS_S_NO_CONTEXT;
+    }
+
     output_token->length = pc->cbMaxMessage;
     output_token->value = new char[pc->cbMaxMessage];
 
@@ -746,11 +828,12 @@ gss_init_sec_context(OM_uint32 *minor_status,
     OM_uint32 minor;
     gss_buffer_desc tn;
     gss_display_name(&minor, target_name, &tn, NULL);
-    if (MultiByteToWideChar(CP_ACP, 0, (LPCCH)tn.value, (int)tn.length,
-            outName, (int)tn.length) == 0) {
+    int len = MultiByteToWideChar(CP_ACP, 0, (LPCCH)tn.value, (int)tn.length,
+            outName, (int)tn.length);
+    if (len == 0) {
         return GSS_S_FAILURE;
     }
-    outName[tn.length] = 0;
+    outName[len] = 0;
 
     BOOL pfDone;
     int flag = flagGss2Sspi(req_flags);
@@ -791,8 +874,8 @@ gss_init_sec_context(OM_uint32 *minor_status,
         InSecBuff.pvBuffer = newBuffer.value;
     } else {
         if (!pc->phCred) {
-            PP("No credentials %p provided, automatically", pc->phCred);
-            CredHandle* newCred = new CredHandle();
+            PP("No credentials provided, acquire automatically");
+            CredHandle* newCred = new CredHandle;
             ss = AcquireCredentialsHandle(
                     NULL,
                     L"Kerberos",
@@ -842,11 +925,13 @@ gss_init_sec_context(OM_uint32 *minor_status,
     output_token->length = OutSecBuff.cbBuffer;
 
     if (output_token->length > 0 && isSameOID(mech_type, &SPNEGO_OID)) {
+        PP("Wrap Kerberos token in Negotiate");
         gss_buffer_desc newBuffer;
-        krb5_to_spnego(output_token, &newBuffer);
+        if (krb5_to_spnego(output_token, &newBuffer) == 0) {
+            return GSS_S_CONTINUE_NEEDED;
+        }
         output_token->length = newBuffer.length;
         output_token->value = newBuffer.value;
-        PP("Wrap Kerberos token in Negotiate");
     }
 
     pfDone = !((SEC_I_CONTINUE_NEEDED == ss) ||
@@ -869,6 +954,7 @@ gss_init_sec_context(OM_uint32 *minor_status,
         if (!SEC_SUCCESS(ss)) {
             return GSS_S_FAILURE;
         }
+        // SPENGO needs another round even if Kerberos is done
         if (isSameOID(mech_type, &SPNEGO_OID) && input_token->length == 0) {
             return GSS_S_CONTINUE_NEEDED;
         } else {
@@ -906,7 +992,9 @@ gss_inquire_context(OM_uint32 *minor_status,
                     int *locally_initiated,
                     int *open)
 {
-    PP(">>>> Calling UNIMPLEMENTED gss_inquire_context...");
+    PP(">>>> Calling gss_inquire_context...");
+    CHECK_CONTEXT(context_handle)
+
     Context* pc = (Context*) context_handle;
     Name* n1 = NULL;
     Name* n2 = NULL;
@@ -948,9 +1036,6 @@ gss_inquire_context(OM_uint32 *minor_status,
         }
         *lifetime_rec = SecondsUntil(&ls.tsExpiry);
     }
-    if (mech_type != NULL) {
-        // No need for Java
-    }
     // TODO: other inquiries
     return GSS_S_COMPLETE;
 err:
@@ -977,13 +1062,22 @@ gss_delete_sec_context(OM_uint32 *minor_status,
                        gss_buffer_t output_token)
 {
     PP(">>>> Calling gss_delete_sec_context...");
+    CHECK_CONTEXT(context_handle)
+
     Context* pc = (Context*) *context_handle;
     DeleteSecurityContext(&pc->hCtxt);
     if (pc->phCred != NULL) {
         FreeCredentialsHandle(pc->phCred);
         pc->phCred = NULL;
     }
-//    FreeContextBuffer(&pc->nnames);
+    if (pc->nnames.sClientName != NULL) {
+        FreeContextBuffer(pc->nnames.sClientName);
+        pc->nnames.sClientName = NULL;
+    }
+    if (pc->nnames.sServerName != NULL) {
+        FreeContextBuffer(pc->nnames.sServerName);
+        pc->nnames.sServerName = NULL;
+    }
     delete pc;
     return GSS_S_COMPLETE;
 }
@@ -994,6 +1088,9 @@ gss_context_time(OM_uint32 *minor_status,
                  OM_uint32 *time_rec)
 {
     PP(">>>> Calling IMPLEMENTED gss_context_time...");
+    CHECK_CONTEXT(context_handle)
+    CHECK_OUTPUT(time_rec)
+
     SECURITY_STATUS ss;
     Context* pc = (Context*) context_handle;
     SecPkgContext_Lifespan ls;
@@ -1021,6 +1118,9 @@ gss_wrap_size_limit(OM_uint32 *minor_status,
                     OM_uint32 *max_input_size)
 {
     PP(">>>> Calling gss_wrap_size_limit...");
+    CHECK_CONTEXT(context_handle)
+    CHECK_OUTPUT(max_input_size)
+
     Context* pc = (Context*) context_handle;
     *max_input_size = pc->cbMaxMessage;
     return GSS_S_COMPLETE;
@@ -1043,6 +1143,10 @@ gss_get_mic(OM_uint32 *minor_status,
             gss_buffer_t msg_token)
 {
     PP(">>>> Calling gss_get_mic...");
+    CHECK_CONTEXT(context_handle);
+    CHECK_BUFFER(message_buffer);
+    CHECK_OUTPUT(msg_token);
+
     Context* pc = (Context*) context_handle;
 
     SECURITY_STATUS ss;
@@ -1080,6 +1184,10 @@ gss_verify_mic(OM_uint32 *minor_status,
                gss_qop_t *qop_state)
 {
     PP(">>>> Calling gss_verify_mic...");
+    CHECK_CONTEXT(context_handle);
+    CHECK_BUFFER(message_buffer);
+    CHECK_BUFFER(token_buffer);
+
     Context* pc = (Context*) context_handle;
 
     SECURITY_STATUS ss;
@@ -1121,6 +1229,10 @@ gss_wrap(OM_uint32 *minor_status,
          gss_buffer_t output_message_buffer)
 {
     PP(">>>> Calling gss_wrap...");
+    CHECK_CONTEXT(context_handle);
+    CHECK_BUFFER(input_message_buffer);
+    CHECK_OUTPUT(output_message_buffer);
+
     Context* pc = (Context*) context_handle;
 
     SECURITY_STATUS ss;
@@ -1185,6 +1297,10 @@ gss_unwrap(OM_uint32 *minor_status,
            gss_qop_t *qop_state)
 {
     PP(">>>> Calling gss_unwrap...");
+    CHECK_CONTEXT(context_handle);
+    CHECK_BUFFER(input_message_buffer);
+    CHECK_OUTPUT(output_message_buffer);
+
     Context* pc = (Context*) context_handle;
 
     SECURITY_STATUS ss;
@@ -1270,6 +1386,8 @@ gss_inquire_names_for_mech(OM_uint32 *minor_status,
                            gss_OID_set *name_types)
 {
     PP(">>>> Calling IMPLEMENTED gss_inquire_names_for_mech...");
+    CHECK_OID(mechanism);
+
     gss_create_empty_oid_set(minor_status, name_types);
     gss_add_oid_set_member(minor_status, &USER_NAME_OID, name_types);
     gss_add_oid_set_member(minor_status, &HOST_SERVICE_NAME_OID, name_types);
@@ -1285,14 +1403,9 @@ gss_add_oid_set_member(OM_uint32 *minor_status,
                        gss_OID_set *oid_set)
 {
     PP(">>>> Calling gss_add_oid_set_member...");
-    if (member_oid == NULL || member_oid->length == 0
-            || member_oid->elements == NULL) {
-        return GSS_S_CALL_INACCESSIBLE_READ;
-    }
+    CHECK_OID(member_oid);
+    CHECK_OUTPUT(oid_set);
 
-    if (oid_set == NULL) {
-        return GSS_S_CALL_INACCESSIBLE_WRITE;
-    }
 
     int count = (int)(*oid_set)->count;
     for (int i = 0; i < count; i++) {
@@ -1362,9 +1475,7 @@ gss_create_empty_oid_set(OM_uint32 *minor_status,
                          gss_OID_set *oid_set)
 {
     PP(">>>> Calling gss_create_empty_oid_set...");
-    if (oid_set == NULL) {
-        return GSS_S_CALL_INACCESSIBLE_WRITE;
-    }
+    CHECK_OUTPUT(oid_set);
 
     if (*oid_set = new gss_OID_set_desc) {
         memset(*oid_set, 0, sizeof(gss_OID_set_desc));
